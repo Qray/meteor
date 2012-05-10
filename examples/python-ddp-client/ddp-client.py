@@ -185,7 +185,7 @@ class App(Cmd):
                 elif map.get('error'):
                     self.pending_method_data_acked = True
                     self.pending_method_result_acked = True
-                    print "* ERROR:", map['error']['reason']
+                    print "* ERROR", map['error']['reason']
         elif map.get('msg') == 'data':
             if map.get('collection'):
                 if map.get('set'):
