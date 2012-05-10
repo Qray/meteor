@@ -1,12 +1,12 @@
 #!/usr/bin/env python2.7
 
-from ws4py.client.threadedclient import WebSocketClient
+from ws4py.client.geventclient import WebSocketClient
 
 import sys
 import json
 from cmd import Cmd
 import readline
-import time
+import gevent
 import string
 import argparse
 import os
@@ -102,7 +102,7 @@ class App(Cmd):
                 self.pending_method_id = None
                 return
             else:
-                time.sleep(0)
+                gevent.sleep(0.1)
 
     ###
     ### The `sub` command
@@ -136,7 +136,7 @@ class App(Cmd):
                 self.pending_sub_id = None
                 return
             else:
-                time.sleep(0)
+                gevent.sleep(0.1)
 
     ###
     ### The `EOF` "command" (to support `cat file | python ddpclient.py`)
@@ -205,7 +205,7 @@ class App(Cmd):
             self.pending_sub_data_acked = True
             print "* NO SUCH SUB"
     def onclose(self):
-        os._exit(1) #xcxc
+        sys.exit(1)
 
     def connect(self, url):
         self.ddpclient = DDPClient(url, self.onmessage, self.onclose, self.print_raw)
@@ -224,6 +224,8 @@ if __name__ == '__main__':
 
     app = App(print_raw=args.print_raw)
     app.connect(args.ddp_endpoint)
+    while not app.ddpclient.connected:
+        gevent.sleep(0.1)
     app.cmdloop()
 
 
