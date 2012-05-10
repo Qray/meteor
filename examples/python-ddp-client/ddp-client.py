@@ -1,3 +1,5 @@
+#!/usr/bin/env python2.7
+
 from ws4py.client.threadedclient import WebSocketClient
 
 import sys
@@ -7,13 +9,15 @@ import readline
 import time
 import string
 import argparse
+import os
 
 class DDPClient(WebSocketClient):
-    def __init__(self, url, onmessage, print_raw):
+    def __init__(self, url, onmessage, onclose, print_raw):
         WebSocketClient.__init__(self, url)
         self.connected = False
         self.onmessage = onmessage
         self.print_raw = print_raw
+        self.onclose = onclose
 
     def print_and_send(self, msg_dict):
         message = json.dumps(msg_dict)
@@ -33,6 +37,7 @@ class DDPClient(WebSocketClient):
     def closed(self, code, reason=None):
         self.connected = False
         print '* CONNECTION CLOSED', code, reason
+        self.onclose()
 
 class App(Cmd):
     """Main input loop."""
@@ -40,9 +45,10 @@ class App(Cmd):
     def __init__(self, print_raw):
         Cmd.__init__(self)
 
-        # Hide the prompt, because it makes the output messy when piping in
-        # a file
-        self.prompt = ''
+        if sys.stdin.isatty():
+            self.prompt = 'DDP> '
+        else:
+            self.prompt = ''
 
         self.ddpclient = None
         self.uid = 0
@@ -62,19 +68,6 @@ class App(Cmd):
         self.pending_sub_data_acked = False
 
     ###
-    ### The `connect` command
-    ###
-    def help_connect(self):
-        print '\n'.join(['connect <websocket endpoint url>',
-                         '  Connect to a DDP endpoint. For Meteor apps, the ' +
-                         'url is something like ' +
-                         '`http://foo.meteor.com/sockjs/websocket`'])
-
-    def do_connect(self, url):
-        self.ddpclient = DDPClient(url, self.onmessage, self.print_raw)
-        self.ddpclient.connect()
-
-    ###
     ### The `method` command
     ###
     def help_method(self):
@@ -85,17 +78,18 @@ class App(Cmd):
                          '"description": "bar"}]']);
 
     def do_method(self, params):
-        split_params = string.split(params, ' ')
-        method_name = split_params[0]
-        params = json.loads(' '.join(split_params[1:]))
+        try:
+            method_name,params = self.parse_command(params)
+        except:
+            print 'Error parsing parameter list - try `help method`'
+            return
 
-        if self.ensure_connected():
-            id = self.next_id()
-            self.ddpclient.print_and_send({"msg": "method",
-                                           "method": method_name,
-                                           "params": params,
-                                           "id": id})
-            self.block_until_method_fully_returns(id)
+        id = self.next_id()
+        self.ddpclient.print_and_send({"msg": "method",
+                                       "method": method_name,
+                                       "params": params,
+                                       "id": id})
+        self.block_until_method_fully_returns(id)
 
     def block_until_method_fully_returns(self, id):
         """Wait until the last call to method gets back all necessary data
@@ -114,22 +108,23 @@ class App(Cmd):
     ### The `sub` command
     ###
     def help_sub(self):
-        print '\n'.join(['sub <subscription name> <json array of parameters>',
+        print '\n'.join(['sub <subscription name> [<json array of parameters>]',
                          '  Subscribes to a remote dataset',
-                         '  Example: sub myApp ["foo.meteor.com"]'])
+                         '  Examples: `sub allApps` or `sub myApp ["foo.meteor.com"]`'])
 
     def do_sub(self, params):
-        split_params = string.split(params, ' ')
-        sub_name = split_params[0]
-        params = json.loads(' '.join(split_params[1:]))
+        try:
+            sub_name,params = self.parse_command(params)
+        except:
+            print 'Error parsing parameter list - try `help sub`'
+            return
 
-        if self.ensure_connected():
-            id = self.next_id()
-            self.ddpclient.print_and_send({"msg": "sub",
-                                           "name": sub_name,
-                                           "params": params,
-                                           "id": id})
-            self.block_until_sub_fully_returns(id)
+        id = self.next_id()
+        self.ddpclient.print_and_send({"msg": "sub",
+                                       "name": sub_name,
+                                       "params": params,
+                                       "id": id})
+        self.block_until_sub_fully_returns(id)
 
     def block_until_sub_fully_returns(self, id):
         """Wait until the last call to sub gets back all necessary data
@@ -156,17 +151,41 @@ class App(Cmd):
         self.uid = self.uid + 1
         return str(self.uid)
 
+    # Parses a command with a first string param and a second json-encoded param
+    def parse_command(self, params):
+        split_params = string.split(params, ' ')
+        name = split_params[0]
+
+        if len(split_params) == 1:
+            params = []
+        else:
+            params = json.loads(' '.join(split_params[1:]))
+
+        return name,params
+
+
     def onmessage(self, message):
         """Parse an incoming message, printing and updating the various
         pending_* attributes as appropriate"""
 
         map = json.loads(message)
-        if map.get('msg') == 'connected':
+        if map.get('msg') == 'error':
+            # Reset all pending state
+            self.pending_sub_data_acked = True
+            self.pending_method_data_acked = True
+            self.pending_method_result_acked = True
+            print "* ERROR", map['reason']
+        elif map.get('msg') == 'connected':
             print "* CONNECTED"
         elif map.get('msg') == 'result':
             if map['id'] == self.pending_method_id:
                 self.pending_method_result_acked = True
-                print "* METHOD RESULT", map['result']
+                if map.get('result'):
+                    print "* METHOD RESULT", map['result']
+                elif map.get('error'):
+                    self.pending_method_data_acked = True
+                    self.pending_method_result_acked = True
+                    print "* ERROR:", map['error']['reason']
         elif map.get('msg') == 'data':
             if map.get('collection'):
                 if map.get('set'):
@@ -182,29 +201,29 @@ class App(Cmd):
                 if self.pending_sub_id in map['subs']:
                     self.pending_sub_data_acked = True
                     print "* SUB COMPLETE"
+        elif map.get('msg') == 'nosub':
+            self.pending_sub_data_acked = True
+            print "* NO SUCH SUB"
+    def onclose(self):
+        os._exit(1) #xcxc
 
-    def ensure_connected(self):
-        if self.ddpclient is None or not self.ddpclient.connected:
-            print 'Connection closed. Use `connect` to establish one'
-            return False
-        else:
-            return True
+    def connect(self, url):
+        self.ddpclient = DDPClient(url, self.onmessage, self.onclose, self.print_raw)
+        self.ddpclient.connect()
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='A command-line tool for communicating with a DDP server.')
-    parser.add_argument('ddp_endpoint', metavar='ddp_endpoint', nargs='?',
+    parser.add_argument('ddp_endpoint', metavar='ddp_endpoint',
                         help='DDP websocket endpoint to connect ' +
-                        'to, e.g. http://foo.meteor.com/sockjs/websocket')
-    parser.add_argument('--print_raw', dest='print_raw', action="store_true",
+                        'to, e.g. ws://foo.meteor.com/websocket')
+    parser.add_argument('--print-raw', dest='print_raw', action="store_true",
                         help='print raw websocket data in addition to parsed results')
     args = parser.parse_args()
 
     app = App(print_raw=args.print_raw)
-
-    if args.ddp_endpoint:
-        app.do_connect(args.ddp_endpoint)
-
+    app.connect(args.ddp_endpoint)
     app.cmdloop()
 
 
